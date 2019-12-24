@@ -1,0 +1,4 @@
+libsndfile1
+sox
+libsox-dev
+libsox-fmt-all

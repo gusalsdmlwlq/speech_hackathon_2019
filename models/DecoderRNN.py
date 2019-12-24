@@ -87,10 +87,10 @@ class DecoderRNN(BaseRNN):
         super(DecoderRNN, self).__init__(vocab_size, max_len, hidden_size,
                 input_dropout_p, dropout_p,
                 n_layers, rnn_cell)
-
+        
         self.bidirectional_encoder = bidirectional
         self.rnn = self.rnn_cell(hidden_size, hidden_size, n_layers, batch_first=True, dropout=dropout_p)
-
+        
         self.output_size = vocab_size
         self.max_length = max_len
         self.use_attention = use_attention
@@ -113,14 +113,31 @@ class DecoderRNN(BaseRNN):
 
         if self.training:
             self.rnn.flatten_parameters()
-
+        
+        hidden = (self.dropout(hidden[0]), self.dropout(hidden[1]))
+#         hidden = self.dropout(hidden)
+        encoder_outputs = self.dropout(encoder_outputs)
+        
+        
+        
         output, hidden = self.rnn(embedded, hidden)
 
         attn = None
         if self.use_attention:
             output, attn = self.attention(output, encoder_outputs)
-
-        predicted_softmax = function(self.out(output.contiguous().view(-1, self.hidden_size)), dim=1).view(batch_size, output_size, -1)
+       
+            
+            
+            
+            
+        
+        output = self.dropout(output)
+        output = self.out(output.contiguous().view(-1, self.hidden_size))
+        
+            
+            
+            
+        predicted_softmax = function(output, dim=1).view(batch_size, output_size, -1)
         return predicted_softmax, hidden, attn
 
     def forward(self, inputs=None, encoder_hidden=None, encoder_outputs=None,
@@ -157,6 +174,9 @@ class DecoderRNN(BaseRNN):
         # If teacher_forcing_ratio is True or False instead of a probability, the unrolling can be done in graph
         if use_teacher_forcing:
             decoder_input = inputs[:, :-1]
+#             decoder input =>  label squence of script
+#             remove </s> token
+#             first compute decoder outputs, next decode using precomputed decoder outputs
             decoder_output, decoder_hidden, attn = self.forward_step(decoder_input, decoder_hidden, encoder_outputs,
                                                                      function=function)
 
@@ -168,6 +188,9 @@ class DecoderRNN(BaseRNN):
                     step_attn = None
                 decode(di, step_output, step_attn)
         else:
+#             start from <s> token
+#             decode each step from just <s> token
+#             like prediction step
             decoder_input = inputs[:, 0].unsqueeze(1)
             for di in range(max_length):
                 decoder_output, decoder_hidden, step_attn = self.forward_step(decoder_input, decoder_hidden, encoder_outputs,

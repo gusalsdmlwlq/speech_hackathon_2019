@@ -33,7 +33,8 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import torch.optim as optim
-import Levenshtein as Lev 
+import Levenshtein as Lev
+import Criterion
 
 import label_loader
 from loader import *
@@ -49,7 +50,7 @@ EOS_token = 0
 PAD_token = 0
 
 if HAS_DATASET == False:
-    DATASET_PATH = './sample_dataset'
+    DATASET_PATH = "/home/jhm9507/speech_dataset"#'./sample_dataset'
 
 DATASET_PATH = os.path.join(DATASET_PATH, 'train')
 
@@ -136,15 +137,12 @@ def train(model, total_batch_size, queue, criterion, optimizer, device, train_be
 
         src_len = scripts.size(1)
         target = scripts[:, 1:]
-
         model.module.flatten_parameters()
-        logit = model(feats, feat_lengths, scripts, teacher_forcing_ratio=teacher_forcing_ratio)
-
+        logit = model(feats, feat_lengths, scripts)
         logit = torch.stack(logit, dim=1).to(device)
 
         y_hat = logit.max(-1)[1]
-
-        loss = criterion(logit.contiguous().view(-1, logit.size(-1)), target.contiguous().view(-1))
+        loss = criterion(logit.contiguous(), target.contiguous())
         total_loss += loss.item()
         total_num += sum(feat_lengths)
 
@@ -213,8 +211,7 @@ def evaluate(model, dataloader, queue, criterion, device):
 
             logit = torch.stack(logit, dim=1).to(device)
             y_hat = logit.max(-1)[1]
-
-            loss = criterion(logit.contiguous().view(-1, logit.size(-1)), target.contiguous().view(-1))
+            loss = criterion(logit.contiguous(), target.contiguous())
             total_loss += loss.item()
             total_num += sum(feat_lengths)
 
@@ -227,7 +224,7 @@ def evaluate(model, dataloader, queue, criterion, device):
     logger.info('evaluate() completed')
     return total_loss / total_num, total_dist / total_length
 
-def bind_model(model, optimizer=None):
+def bind_model(model, melspec, todb, optimizer=None):
     def load(filename, **kwargs):
         state = torch.load(os.path.join(filename, 'model.pt'))
         model.load_state_dict(state['model'])
@@ -246,7 +243,7 @@ def bind_model(model, optimizer=None):
         model.eval()
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        input = get_spectrogram_feature(wav_path).unsqueeze(0)
+        input = get_spectrogram_feature(wav_path, melspec, todb, is_train=False).unsqueeze(0)
         input = input.to(device)
 
         logit = model(input_variable=input, input_lengths=None, teacher_forcing_ratio=0)
@@ -286,7 +283,7 @@ def split_dataset(config, wav_paths, script_paths, valid_ratio=0.05):
                                         SOS_token, EOS_token))
         train_begin = train_end 
 
-    valid_dataset = BaseDataset(wav_paths[train_end_raw_id:], script_paths[train_end_raw_id:], SOS_token, EOS_token)
+    valid_dataset = BaseDataset(wav_paths[train_end_raw_id:], script_paths[train_end_raw_id:], SOS_token, EOS_token, is_train=False)
 
     return train_batch_num, train_dataset_list, valid_dataset
 
@@ -302,6 +299,7 @@ def main():
     parser.add_argument('--hidden_size', type=int, default=512, help='hidden size of model (default: 256)')
     parser.add_argument('--layer_size', type=int, default=3, help='number of layers of model (default: 3)')
     parser.add_argument('--dropout', type=float, default=0.2, help='dropout rate in training (default: 0.2)')
+    parser.add_argument('--input_dropout', type=float, default=0.2, help='dropout rate in training (default: 0.2)')
     parser.add_argument('--bidirectional', action='store_true', help='use bidirectional RNN for encoder (default: False)')
     parser.add_argument('--use_attention', action='store_true', help='use attention between encoder-decoder (default: False)')
     parser.add_argument('--batch_size', type=int, default=32, help='batch size in training (default: 32)')
@@ -332,17 +330,19 @@ def main():
 
     # N_FFT: defined in loader.py
     feature_size = N_FFT / 2 + 1
-
+    feature_size = 128
+    
     enc = EncoderRNN(feature_size, args.hidden_size,
-                     input_dropout_p=args.dropout, dropout_p=args.dropout,
-                     n_layers=args.layer_size, bidirectional=args.bidirectional, rnn_cell='gru', variable_lengths=False)
+                     input_dropout_p=args.input_dropout, dropout_p=args.dropout,
+                     n_layers=args.layer_size, bidirectional=args.bidirectional, rnn_cell='lstm', variable_lengths=False)
 
     dec = DecoderRNN(len(char2index), args.max_len, args.hidden_size * (2 if args.bidirectional else 1),
                      SOS_token, EOS_token,
-                     n_layers=args.layer_size, rnn_cell='gru', bidirectional=args.bidirectional,
-                     input_dropout_p=args.dropout, dropout_p=args.dropout, use_attention=args.use_attention)
+                     n_layers=args.layer_size, rnn_cell='lstm', bidirectional=args.bidirectional,
+                     input_dropout_p=args.input_dropout, dropout_p=args.dropout, use_attention=args.use_attention)
 
     model = Seq2seq(enc, dec)
+    
     model.flatten_parameters()
 
     for param in model.parameters():
@@ -351,9 +351,13 @@ def main():
     model = nn.DataParallel(model).to(device)
 
     optimizer = optim.Adam(model.module.parameters(), lr=args.lr)
-    criterion = nn.CrossEntropyLoss(reduction='sum', ignore_index=PAD_token).to(device)
-
-    bind_model(model, optimizer)
+#     criterion = nn.CrossEntropyLoss(reduction='sum', ignore_index=PAD_token).to(device)
+    criterion = Criterion.SmoothingLoss(PAD_token, 0.2).to(device)
+    infer_melspec = transforms.MelSpectrogram(sample_rate=16000, n_fft=512, n_mels = 128)
+    infer_todb = transforms.AmplitudeToDB(stype="magnitude",top_db=80)
+    
+    
+    bind_model(model, infer_melspec, infer_todb, optimizer)
 
     if args.pause == 1:
         nsml.paused(scope=locals())
@@ -380,12 +384,16 @@ def main():
     target_path = os.path.join(DATASET_PATH, 'train_label')
     load_targets(target_path)
 
-    train_batch_num, train_dataset_list, valid_dataset = split_dataset(args, wav_paths, script_paths, valid_ratio=0.05)
+    train_batch_num, train_dataset_list, valid_dataset = split_dataset(args, wav_paths, script_paths, valid_ratio=0.2)
 
     logger.info('start')
 
     train_begin = time.time()
-
+    
+    
+#     teacher_forcing = args.teacher_forcing
+    nsml.load(checkpoint="model99", session="team38/sr-hack-2019-50000/9")
+    
     for epoch in range(begin_epoch, args.max_epochs):
 
         train_queue = queue.Queue(args.workers * 2)
@@ -393,9 +401,11 @@ def main():
         train_loader = MultiLoader(train_dataset_list, train_queue, args.batch_size, args.workers)
         train_loader.start()
 
-        train_loss, train_cer = train(model, train_batch_num, train_queue, criterion, optimizer, device, train_begin, args.workers, 10, args.teacher_forcing)
+        train_loss, train_cer = train(model, train_batch_num, train_queue, criterion, optimizer, device, train_begin, args.workers, 10)
         logger.info('Epoch %d (Training) Loss %0.4f CER %0.4f' % (epoch, train_loss, train_cer))
-
+        
+#         teacher_forcing *= 0.95
+        
         train_loader.join()
 
         valid_queue = queue.Queue(args.workers * 2)
@@ -412,8 +422,8 @@ def main():
             eval__loss=eval_loss, eval__cer=eval_cer)
 
         best_model = (eval_loss < best_loss)
-        nsml.save(args.save_name)
-
+        nsml.save("{}{}".format(args.save_name,epoch))
+        
         if best_model:
             nsml.save('best')
             best_loss = eval_loss

@@ -62,6 +62,7 @@ class BaseRNN(nn.Module):
             raise ValueError("Unsupported RNN Cell: {0}".format(rnn_cell))
 
         self.dropout_p = dropout_p
+        self.dropout = nn.Dropout(p=dropout_p)
 
     def forward(self, *args, **kwargs):
         raise NotImplementedError()

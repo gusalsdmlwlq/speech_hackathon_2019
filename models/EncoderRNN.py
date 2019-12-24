@@ -75,15 +75,16 @@ class EncoderRNN(BaseRNN):
             nn.Conv2d(1, 32, kernel_size=(41, 11), stride=(2, 2), padding=(20, 5)),
             nn.BatchNorm2d(32),
             nn.Hardtanh(0, 20, inplace=True),
-            nn.Conv2d(32, 32, kernel_size=(21, 11), stride=(2, 1), padding=(10, 5)),
-            nn.BatchNorm2d(32),
+            nn.Conv2d(32, 64, kernel_size=(21, 11), stride=(2, 1), padding=(10, 5)),
+            nn.BatchNorm2d(64),
             nn.Hardtanh(0, 20, inplace=True)
         )
-
+        
+        
         feature_size = math.ceil((feature_size - 11 + 1 + (5*2)) / 2)
         feature_size = math.ceil(feature_size - 11 + 1 + (5*2))
-        feature_size *= 32
-
+        feature_size *= 64
+    
         self.rnn = self.rnn_cell(feature_size, hidden_size, n_layers,
                                  batch_first=True, bidirectional=bidirectional, dropout=dropout_p)
 
@@ -102,6 +103,7 @@ class EncoderRNN(BaseRNN):
         """
         
         input_var = input_var.unsqueeze(1)
+        input_var = self.input_dropout(input_var)
         x = self.conv(input_var)
 
         # BxCxTxD => BxCxDxT
